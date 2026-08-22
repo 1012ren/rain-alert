@@ -1,0 +1,768 @@
+<title>雨アラートのしくみ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Noto+Sans+JP:wght@400;500;700&family=Zen+Kaku+Gothic+New:wght@700;900&display=swap">
+
+<style>
+  /* ============================================================
+     配色は、このシステム自身が読み取っている
+     気象庁の降水強度カラースケールから取っている。
+     ============================================================ */
+  :root {
+    --bg:          #F5F7FC;
+    --surface:     #FFFFFF;
+    --surface-2:   #EDF1FA;
+    --ink:         #111A33;
+    --ink-soft:    #49546F;
+    --ink-faint:   #7C859C;
+    --line:        #DCE2F0;
+    --line-strong: #C3CCE2;
+    --accent:      #0041FF;
+    --accent-ink:  #0038DB;
+    --accent-soft: #E6EDFF;
+    --warn:        #C97400;
+    --crit:        #D42400;
+    --shadow:      0 1px 2px rgba(17, 26, 51, .05), 0 8px 24px -12px rgba(17, 26, 51, .18);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:          #080D1B;
+      --surface:     #111A30;
+      --surface-2:   #182241;
+      --ink:         #E7EBF7;
+      --ink-soft:    #A6B1CC;
+      --ink-faint:   #6F7B99;
+      --line:        #24304F;
+      --line-strong: #35446B;
+      --accent:      #7BA3FF;
+      --accent-ink:  #A6C2FF;
+      --accent-soft: #172244;
+      --warn:        #FFB84D;
+      --crit:        #FF7A5C;
+      --shadow:      0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -12px rgba(0, 0, 0, .7);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg:          #080D1B;
+    --surface:     #111A30;
+    --surface-2:   #182241;
+    --ink:         #E7EBF7;
+    --ink-soft:    #A6B1CC;
+    --ink-faint:   #6F7B99;
+    --line:        #24304F;
+    --line-strong: #35446B;
+    --accent:      #7BA3FF;
+    --accent-ink:  #A6C2FF;
+    --accent-soft: #172244;
+    --warn:        #FFB84D;
+    --crit:        #FF7A5C;
+    --shadow:      0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -12px rgba(0, 0, 0, .7);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Noto Sans JP", system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.85;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: 1140px;
+    margin: 0 auto;
+    padding: clamp(2rem, 5vw, 4.5rem) clamp(1.1rem, 4vw, 2.5rem) 6rem;
+    display: flex;
+    flex-direction: column;
+    gap: clamp(3rem, 6vw, 4.75rem);
+  }
+
+  .col {
+    max-width: 68ch;
+    display: flex;
+    flex-direction: column;
+    gap: 1.15rem;
+  }
+
+  /* ---------- 見出し ---------- */
+  h1, h2, h3 {
+    font-family: "Zen Kaku Gothic New", "Noto Sans JP", sans-serif;
+    text-wrap: balance;
+    margin: 0;
+    line-height: 1.35;
+  }
+  h1 { font-size: clamp(2.1rem, 5.5vw, 3.15rem); font-weight: 900; letter-spacing: -.02em; }
+  h2 { font-size: clamp(1.4rem, 3vw, 1.8rem); font-weight: 700; letter-spacing: -.01em; }
+  h3 { font-size: 1.02rem; font-weight: 700; }
+
+  p { margin: 0; }
+  strong { font-weight: 700; color: var(--ink); }
+
+  .eyebrow {
+    font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+    font-size: .705rem;
+    letter-spacing: .17em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+    margin: 0;
+  }
+
+  .lede { font-size: 1.115rem; color: var(--ink-soft); }
+  .note { font-size: .9rem; color: var(--ink-faint); line-height: 1.75; }
+
+  /* ---------- ヘッダー ---------- */
+  header.hd { display: flex; flex-direction: column; gap: 1.1rem; max-width: 68ch; }
+  .hd-meta {
+    display: flex; flex-wrap: wrap; gap: .5rem .55rem;
+    font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+    font-size: .75rem;
+  }
+  .hd-meta span {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    border-radius: 999px;
+    padding: .22rem .68rem;
+    color: var(--ink-soft);
+  }
+
+  /* ---------- セクション ---------- */
+  section { display: flex; flex-direction: column; gap: 1.6rem; }
+  .sec-head { display: flex; flex-direction: column; gap: .45rem; max-width: 68ch; }
+
+  /* ---------- 成果カード ---------- */
+  .wins { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 1rem; }
+  .win {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1.3rem 1.35rem 1.4rem;
+    display: flex; flex-direction: column; gap: .5rem;
+    box-shadow: var(--shadow);
+  }
+  .win b { font-family: "Zen Kaku Gothic New", sans-serif; font-size: 1.03rem; font-weight: 700; }
+  .win p { font-size: .885rem; color: var(--ink-soft); line-height: 1.75; }
+  .win .tick {
+    font-family: "JetBrains Mono", monospace; font-size: .68rem;
+    letter-spacing: .12em; color: var(--accent-ink);
+  }
+
+  /* ---------- 構成図 ---------- */
+  figure.diagram { margin: 0; display: flex; flex-direction: column; gap: 1rem; }
+  .canvas {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 1.5rem 1.25rem;
+    overflow-x: auto;
+    box-shadow: var(--shadow);
+  }
+  .canvas svg { display: block; width: 100%; min-width: 860px; height: auto; }
+
+  .legend {
+    display: flex; flex-wrap: wrap; gap: .6rem 1.5rem;
+    font-size: .8rem; color: var(--ink-soft);
+  }
+  .legend i { display: inline-flex; align-items: center; gap: .5rem; font-style: normal; }
+  .swatch { width: 26px; height: 15px; border-radius: 3px; flex: none; }
+  .sw-mine { background: var(--accent-soft); border: 1.5px solid var(--accent); }
+  .sw-ext  { background: var(--bg); border: 1.5px solid var(--line-strong); }
+  .sw-cloud{ background: transparent; border: 1.5px dashed var(--ink-faint); }
+
+  figcaption { font-size: .87rem; color: var(--ink-faint); line-height: 1.75; max-width: 74ch; }
+
+  /* ---------- ファイル一覧 ---------- */
+  .files { display: flex; flex-direction: column; gap: 0; border-top: 1px solid var(--line); }
+  .file {
+    display: grid;
+    grid-template-columns: minmax(190px, 250px) 1fr;
+    gap: .3rem 2rem;
+    padding: 1.15rem 0 1.25rem;
+    border-bottom: 1px solid var(--line);
+    align-items: start;
+  }
+  .file .fname {
+    font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+    font-size: .84rem; font-weight: 700; color: var(--accent-ink);
+    word-break: break-all; line-height: 1.6;
+  }
+  .file .frole {
+    display: block; font-family: "Noto Sans JP", sans-serif; font-weight: 500;
+    font-size: .715rem; letter-spacing: .1em; color: var(--ink-faint); margin-top: .15rem;
+  }
+  .file .fbody { font-size: .93rem; color: var(--ink-soft); line-height: 1.85; }
+  .file .fbody b { color: var(--ink); }
+
+  @media (max-width: 620px) {
+    .file { grid-template-columns: 1fr; gap: .55rem; }
+  }
+
+  /* ---------- 流れ ---------- */
+  .flows { display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap: 1.75rem; }
+  .flow {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 6px;
+    padding: 1.45rem 1.5rem 1.6rem; box-shadow: var(--shadow);
+    display: flex; flex-direction: column; gap: 1.05rem;
+  }
+  .flow-hd { display: flex; flex-direction: column; gap: .2rem; }
+  .flow-hd b { font-family: "Zen Kaku Gothic New", sans-serif; font-size: 1.06rem; }
+  .flow-hd span {
+    font-family: "JetBrains Mono", monospace; font-size: .7rem;
+    letter-spacing: .13em; color: var(--accent-ink);
+  }
+  ol.steps { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: .8rem; counter-reset: s; }
+  ol.steps li {
+    counter-increment: s;
+    display: grid; grid-template-columns: 1.55rem 1fr; gap: .8rem;
+    font-size: .89rem; color: var(--ink-soft); line-height: 1.7;
+  }
+  ol.steps li::before {
+    content: counter(s);
+    font-family: "JetBrains Mono", monospace; font-size: .72rem; font-weight: 700;
+    color: var(--accent-ink); background: var(--accent-soft);
+    border-radius: 3px; height: 1.4rem; display: grid; place-items: center;
+    font-variant-numeric: tabular-nums;
+  }
+  ol.steps li b { color: var(--ink); }
+  code {
+    font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+    font-size: .855em; background: var(--surface-2);
+    border-radius: 3px; padding: .09em .38em; color: var(--ink);
+  }
+
+  /* ---------- 降水スケール ---------- */
+  .scale-wrap { display: flex; flex-direction: column; gap: .55rem; }
+  .scale { display: flex; border-radius: 4px; overflow: hidden; border: 1px solid var(--line-strong); }
+  .scale div { flex: 1; height: 40px; position: relative; }
+  .scale-labels {
+    display: flex; font-family: "JetBrains Mono", monospace;
+    font-size: .655rem; color: var(--ink-faint); font-variant-numeric: tabular-nums;
+  }
+  .scale-labels div { flex: 1; text-align: center; }
+  .marks { display: flex; gap: 1.4rem; flex-wrap: wrap; font-size: .82rem; color: var(--ink-soft); }
+  .marks i { font-style: normal; display: inline-flex; align-items: center; gap: .45rem; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+
+  /* ---------- 補足カード ---------- */
+  .points { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 1.1rem; }
+  .point {
+    border: 1px solid var(--line); border-radius: 6px; background: var(--surface);
+    padding: 1.35rem 1.45rem 1.45rem; display: flex; flex-direction: column; gap: .6rem;
+  }
+  .point h3 { color: var(--ink); }
+  .point p { font-size: .89rem; color: var(--ink-soft); line-height: 1.8; }
+  .point .q {
+    font-family: "JetBrains Mono", monospace; font-size: .68rem;
+    letter-spacing: .12em; color: var(--ink-faint);
+  }
+
+  /* ---------- 表 ---------- */
+  .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; min-width: 520px; font-size: .885rem; }
+  th, td { text-align: left; padding: .78rem 1.1rem; border-bottom: 1px solid var(--line); }
+  thead th {
+    font-family: "JetBrains Mono", monospace; font-size: .68rem;
+    letter-spacing: .12em; text-transform: uppercase; color: var(--ink-faint); font-weight: 400;
+    background: var(--surface-2);
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td b { font-weight: 700; }
+  td.svc { font-family: "Zen Kaku Gothic New", sans-serif; font-weight: 700; white-space: nowrap; }
+
+  /* ---------- 注意 ---------- */
+  .cautions { display: flex; flex-direction: column; gap: .9rem; }
+  .caution {
+    display: grid; grid-template-columns: auto 1fr; gap: .95rem;
+    border-left: 2px solid var(--crit); padding: .1rem 0 .1rem 1.1rem;
+    font-size: .9rem; color: var(--ink-soft); line-height: 1.8;
+  }
+  .caution b { display: block; color: var(--ink); font-weight: 700; }
+  .caution .lbl {
+    font-family: "JetBrains Mono", monospace; font-size: .66rem; letter-spacing: .1em;
+    color: var(--crit); padding-top: .38rem;
+  }
+
+  hr.rule { border: none; border-top: 1px solid var(--line); margin: 0; }
+
+  a { color: var(--accent-ink); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, *:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+</style>
+
+<div class="page">
+
+  <header class="hd">
+    <p class="eyebrow">SwitchBot → 気象庁 → LINE</p>
+    <h1>雨アラートのしくみ</h1>
+    <p class="lede">
+      自宅にゲリラ豪雨が近づいたらLINEに知らせ、毎朝6時にはその日1日の雨の予報をグラフで送る。
+      そのために作った9つのファイルが、それぞれ何をしているかをまとめた資料です。
+    </p>
+    <div class="hd-meta">
+      <span>2026-08-23</span>
+      <span>Python</span>
+      <span>GitHub Actions</span>
+      <span>LINE Messaging API</span>
+    </div>
+  </header>
+
+  <hr class="rule">
+
+  <!-- ============ 何ができるか ============ -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">01 — できること</p>
+      <h2>このシステムがしてくれること</h2>
+      <p class="note">
+        もともとの出発点は「SwitchBotで何か作れないか」でした。SwitchBot Hub 2にGPSは入っていないと分かったので、
+        <strong>自宅は動かない</strong>という当たり前の事実を使い、緯度経度を一度だけ調べて固定値として使う方式に落ち着いています。
+        座標そのものはコードには書かず、外から渡しています（理由は最後の注意点を参照）。
+      </p>
+    </div>
+    <div class="wins">
+      <div class="win">
+        <span class="tick">5分ごと</span>
+        <b>豪雨をつかまえる</b>
+        <p>自宅の半径1kmに強い雨が近づくと、降り出す前にLINEへ通知します。弱い雨と激しい雨で、通知の文面が変わります。</p>
+      </div>
+      <div class="win">
+        <span class="tick">毎朝 6:00</span>
+        <b>1日の雨をグラフで見る</b>
+        <p>その日24時間ぶんの降水予報を棒グラフの画像にして送ります。傘が要る日かどうかが一目で分かります。</p>
+      </div>
+      <div class="win">
+        <span class="tick">電源オフでもOK</span>
+        <b>パソコンが要らない</b>
+        <p>GitHubのサーバー上で動くので、自分のMacやスマホが起動していなくても動き続けます。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 構成図 ============ -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">02 — 全体像</p>
+      <h2>システム構成図</h2>
+      <p class="note">
+        左が雨のデータを提供してくれる場所、真ん中が自分で書いたプログラム、右が通知の届け先です。
+        矢印には「何が流れているか」を書いています。
+      </p>
+    </div>
+
+    <figure class="diagram">
+      <div class="canvas">
+        <svg viewBox="0 0 1060 500" role="img"
+             aria-label="気象庁ナウキャストとOpen-Meteoの2つのデータ源から、GitHub Actions上で動く3つのPythonファイルが降水情報を取得し、判定した結果をLINEへ通知するまでの流れ。上段が5分ごとの豪雨アラート、下段が毎朝6時の予報グラフ。">
+          <defs>
+            <marker id="ah" viewBox="0 0 10 10" refX="9.2" refY="5"
+                    markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+            </marker>
+          </defs>
+
+          <!-- ===== GitHub Actions の枠 ===== -->
+          <rect x="265" y="32" width="500" height="448" rx="10"
+                fill="none" stroke="currentColor" stroke-opacity=".28" stroke-dasharray="6 5"/>
+          <text x="281" y="55" font-family="'JetBrains Mono', monospace" font-size="11.5"
+                fill="currentColor" fill-opacity=".55" letter-spacing="0.06em">GitHub Actions（クラウド上のサーバー）</text>
+
+          <!-- レーン仕切り -->
+          <line x1="275" y1="352" x2="755" y2="352"
+                stroke="currentColor" stroke-opacity=".16" stroke-dasharray="3 4"/>
+
+          <text x="281" y="88" font-family="'Noto Sans JP', sans-serif" font-size="11.5"
+                font-weight="700" fill="var(--accent)">① 5分ごと ─ 豪雨アラート</text>
+          <text x="281" y="376" font-family="'Noto Sans JP', sans-serif" font-size="11.5"
+                font-weight="700" fill="var(--accent)">② 毎朝6時 ─ 予報グラフ</text>
+
+          <!-- ===== 外部: 気象庁 ===== -->
+          <rect x="20" y="100" width="190" height="72" rx="7"
+                fill="var(--bg)" stroke="var(--line-strong)" stroke-width="1.5"/>
+          <text x="115" y="130" text-anchor="middle" font-family="'Zen Kaku Gothic New', sans-serif"
+                font-size="13.5" font-weight="700" fill="currentColor">気象庁ナウキャスト</text>
+          <text x="115" y="151" text-anchor="middle" font-family="'Noto Sans JP', sans-serif"
+                font-size="10.5" fill="currentColor" fill-opacity=".6">250mメッシュ / 5分更新</text>
+
+          <!-- ===== 外部: Open-Meteo ===== -->
+          <rect x="20" y="220" width="190" height="72" rx="7"
+                fill="var(--bg)" stroke="var(--line-strong)" stroke-width="1.5"/>
+          <text x="115" y="250" text-anchor="middle" font-family="'Zen Kaku Gothic New', sans-serif"
+                font-size="13.5" font-weight="700" fill="currentColor">Open-Meteo</text>
+          <text x="115" y="271" text-anchor="middle" font-family="'Noto Sans JP', sans-serif"
+                font-size="10.5" fill="currentColor" fill-opacity=".6">世界の予報モデル</text>
+
+          <!-- ===== 自作: jma_nowcast.py ===== -->
+          <rect x="292" y="100" width="192" height="72" rx="7"
+                fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+          <text x="388" y="130" text-anchor="middle" font-family="'JetBrains Mono', monospace"
+                font-size="12.5" font-weight="700" fill="var(--accent-ink)">jma_nowcast.py</text>
+          <text x="388" y="151" text-anchor="middle" font-family="'Noto Sans JP', sans-serif"
+                font-size="10.5" fill="currentColor" fill-opacity=".72">画像の色 → 雨量</text>
+
+          <!-- ===== 自作: rain_alert.py ===== -->
+          <rect x="540" y="100" width="192" height="72" rx="7"
+                fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+          <text x="636" y="130" text-anchor="middle" font-family="'JetBrains Mono', monospace"
+                font-size="12.5" font-weight="700" fill="var(--accent-ink)">rain_alert.py</text>
+          <text x="636" y="151" text-anchor="middle" font-family="'Noto Sans JP', sans-serif"
+                font-size="10.5" fill="currentColor" fill-opacity=".72">判定して送信</text>
+
+          <!-- ===== 自作: state.json ===== -->
+          <rect x="540" y="290" width="192" height="48" rx="7"
+                fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="4 3"/>
+          <text x="636" y="311" text-anchor="middle" font-family="'JetBrains Mono', monospace"
+                font-size="11" font-weight="700" fill="var(--accent-ink)">rain_alert_state.json</text>
+          <text x="636" y="328" text-anchor="middle" font-family="'Noto Sans JP', sans-serif"
+                font-size="10" fill="currentColor" fill-opacity=".62">通知の履歴メモ</text>
+
+          <!-- ===== 自作: daily_summary.py ===== -->
+          <rect x="292" y="388" width="192" height="72" rx="7"
+                fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+          <text x="388" y="418" text-anchor="middle" font-family="'JetBrains Mono', monospace"
+                font-size="12.5" font-weight="700" fill="var(--accent-ink)">daily_summary.py</text>
+          <text x="388" y="439" text-anchor="middle" font-family="'Noto Sans JP', sans-serif"
+                font-size="10.5" fill="currentColor" fill-opacity=".72">グラフを作る</text>
+
+          <!-- ===== 外部: LINE ===== -->
+          <rect x="830" y="92" width="190" height="108" rx="7"
+                fill="var(--bg)" stroke="var(--line-strong)" stroke-width="1.5"/>
+          <text x="925" y="140" text-anchor="middle" font-family="'Zen Kaku Gothic New', sans-serif"
+                font-size="21" font-weight="900" fill="currentColor">LINE</text>
+          <text x="925" y="165" text-anchor="middle" font-family="'Noto Sans JP', sans-serif"
+                font-size="10.5" fill="currentColor" fill-opacity=".6">スマホに届く</text>
+
+          <!-- ===== 外部: imgbb ===== -->
+          <rect x="830" y="388" width="190" height="72" rx="7"
+                fill="var(--bg)" stroke="var(--line-strong)" stroke-width="1.5"/>
+          <text x="925" y="418" text-anchor="middle" font-family="'Zen Kaku Gothic New', sans-serif"
+                font-size="13.5" font-weight="700" fill="currentColor">imgbb</text>
+          <text x="925" y="439" text-anchor="middle" font-family="'Noto Sans JP', sans-serif"
+                font-size="10.5" fill="currentColor" fill-opacity=".6">画像の置き場所</text>
+
+          <!-- ===== 矢印 ===== -->
+          <g stroke="currentColor" stroke-opacity=".55" stroke-width="1.5" fill="none" color="var(--ink-soft)">
+            <line x1="210" y1="136" x2="285" y2="136" marker-end="url(#ah)"/>
+            <line x1="484" y1="136" x2="533" y2="136" marker-end="url(#ah)"/>
+            <polyline points="210,256 586,256 586,179" marker-end="url(#ah)"/>
+            <polyline points="115,292 115,424 285,424" marker-end="url(#ah)"/>
+            <line x1="680" y1="172" x2="680" y2="283" marker-end="url(#ah)" marker-start="url(#ah)"/>
+            <line x1="732" y1="136" x2="823" y2="136" marker-end="url(#ah)"/>
+            <line x1="484" y1="424" x2="823" y2="424" marker-end="url(#ah)"/>
+            <line x1="925" y1="388" x2="925" y2="207" marker-end="url(#ah)"/>
+          </g>
+
+          <!-- ===== 矢印のラベル ===== -->
+          <g font-family="'Noto Sans JP', sans-serif" font-size="10" fill="currentColor" fill-opacity=".72">
+            <text x="247" y="128" text-anchor="middle">タイル画像</text>
+            <text x="508" y="128" text-anchor="middle">雨量</text>
+            <text x="392" y="248" text-anchor="middle">15分ごとの予報</text>
+            <text x="200" y="416" text-anchor="middle">1日分の予報</text>
+            <text x="670" y="232" text-anchor="end">前回の通知時刻</text>
+            <text x="777" y="128" text-anchor="middle">通知を送信</text>
+            <text x="653" y="416" text-anchor="middle">グラフ画像を預ける</text>
+            <text x="936" y="300">画像URL</text>
+          </g>
+        </svg>
+      </div>
+
+      <div class="legend">
+        <i><span class="swatch sw-mine"></span>自分で書いたファイル</i>
+        <i><span class="swatch sw-ext"></span>外部のサービス</i>
+        <i><span class="swatch sw-cloud"></span>クラウド上で動く範囲</i>
+      </div>
+
+      <figcaption>
+        2つのデータ源から雨の情報を集め、<code>rain_alert.py</code> が判定してLINEへ送るまでの流れ。
+        上段（①）と下段（②）は別々のタイミングで動く、独立した2本の流れです。
+        <code>imgbb</code> を経由しているのは、LINEに画像を送るには「インターネット上のURL」が必要という決まりがあるためです。
+      </figcaption>
+    </figure>
+  </section>
+
+  <!-- ============ ファイルの役割 ============ -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">03 — ファイル</p>
+      <h2>どのファイルが何をしているか</h2>
+      <p class="note">
+        全部で9つ。「実際に処理をするファイル」「覚えておくためのファイル」「設定を書いたファイル」の3種類に分かれます。
+      </p>
+    </div>
+
+    <div class="files">
+      <div class="file">
+        <div class="fname">rain_alert.py<span class="frole">処理 — 中心</span></div>
+        <div class="fbody">
+          このシステムの<b>司令塔</b>。2つのデータ源から雨の強さを取り寄せ、どちらか強い方を採用し、
+          しきい値（1mm/h と 20mm/h）と比べて通知するかを決め、LINEへ文章を送ります。
+          自宅の緯度経度やしきい値も、このファイルの上部にまとまっています。
+        </div>
+      </div>
+
+      <div class="file">
+        <div class="fname">jma_nowcast.py<span class="frole">処理 — 気象庁担当</span></div>
+        <div class="fbody">
+          気象庁のナウキャストには数値で答えてくれるAPIが無く、<b>地図の画像</b>としてしか配信されていません。
+          そこでこのファイルが、緯度経度から画像のどの位置かを計算し、その<b>ピクセルの色を読んで雨量に変換</b>します。
+          自宅の1点だけだと隣町の豪雨を見逃すため、半径約1kmぶんを調べて一番強い値を採用しています。
+        </div>
+      </div>
+
+      <div class="file">
+        <div class="fname">daily_summary.py<span class="frole">処理 — 毎朝担当</span></div>
+        <div class="fbody">
+          24時間ぶんの降水予報を取得し、<b>棒グラフの画像を作って</b>LINEへ送ります。
+          雨の強さで棒の色が変わり（灰色＝ほぼ降らない／青＝雨／赤＝豪雨）、しきい値の位置には点線が引かれます。
+        </div>
+      </div>
+
+      <div class="file">
+        <div class="fname">rain_alert_state.json<span class="frole">記憶</span></div>
+        <div class="fbody">
+          <b>前回いつ通知したか</b>だけを書いた小さなメモです。これが無いと、同じ雨について5分おきに何十回も
+          通知が飛んでしまいます。プログラムが自動で書き換えるので、人が触る必要はありません。
+        </div>
+      </div>
+
+      <div class="file">
+        <div class="fname">.github/workflows/<br>rain_alert.yml<span class="frole">設定 — 時間割</span></div>
+        <div class="fbody">
+          GitHubに対する<b>「5分ごとに <code>rain_alert.py</code> を動かして」という指示書</b>です。
+          必要な部品を入れる手順や、書き換わったメモを保存し直す手順もここに書いてあります。
+        </div>
+      </div>
+
+      <div class="file">
+        <div class="fname">.github/workflows/<br>daily_summary.yml<span class="frole">設定 — 時間割</span></div>
+        <div class="fbody">
+          同じく<b>「毎朝6時に <code>daily_summary.py</code> を動かして」という指示書</b>。
+          グラフの日本語が文字化けしないよう、日本語フォントを入れる手順も含まれています。
+        </div>
+      </div>
+
+      <div class="file">
+        <div class="fname">requirements.txt<span class="frole">設定 — 部品表</span></div>
+        <div class="fbody">
+          プログラムが使う<b>部品（ライブラリ）の一覧</b>。通信用の <code>requests</code>、画像を読む <code>Pillow</code>、
+          グラフを描く <code>matplotlib</code> の3つです。GitHubはこの表を見て、実行前に部品をそろえます。
+        </div>
+      </div>
+
+      <div class="file">
+        <div class="fname">.env<span class="frole">設定 — 秘密（自分のMacのみ）</span></div>
+        <div class="fbody">
+          LINEやimgbbの<b>合言葉（トークン）と、自宅の緯度経度</b>を書いたファイル。
+          他人に渡ると自分になりすまして通知を送られたり、自宅の場所が知られたりするため、
+          <b>GitHubには絶対に上げません</b>。クラウド側では代わりに、GitHubの「Secrets」という
+          暗号化された金庫に同じ値を登録してあります。コード側は「金庫から受け取る」とだけ書いてあります。
+        </div>
+      </div>
+
+      <div class="file">
+        <div class="fname">.gitignore<span class="frole">設定 — 除外リスト</span></div>
+        <div class="fbody">
+          <b>GitHubに上げないファイルを指定するリスト</b>。<code>.env</code> をここに書いておくことで、
+          うっかり合言葉を公開してしまう事故を防いでいます。
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 処理の流れ ============ -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">04 — 順番</p>
+      <h2>動くときの流れ</h2>
+      <p class="note">番号は実際に処理が進む順番です。2本の流れは互いに影響しません。</p>
+    </div>
+
+    <div class="flows">
+      <div class="flow">
+        <div class="flow-hd">
+          <span>① 5分ごと</span>
+          <b>豪雨アラート</b>
+        </div>
+        <ol class="steps">
+          <li>GitHubが時間になったことに気づき、<code>rain_alert.py</code> を起動する。</li>
+          <li><code>jma_nowcast.py</code> が気象庁のタイル画像を取得し、自宅周辺の色を雨量に変換する。</li>
+          <li>同時に Open-Meteo からも15分刻みの予報を取り寄せる。</li>
+          <li>2つのうち<b>強い方</b>を採用する（見逃しを減らすため）。</li>
+          <li>20mm/h以上なら「豪雨注意」、1mm/h以上なら「まもなく雨」と判定する。</li>
+          <li>メモを見て、前回の通知から十分に時間が空いていればLINEへ送り、メモを更新する。</li>
+        </ol>
+      </div>
+
+      <div class="flow">
+        <div class="flow-hd">
+          <span>② 毎朝 6:00</span>
+          <b>予報グラフ</b>
+        </div>
+        <ol class="steps">
+          <li>GitHubが <code>daily_summary.py</code> を起動する。</li>
+          <li>Open-Meteo から、その日24時間ぶんの降水予報を取得する。</li>
+          <li>雨の強さで色分けした棒グラフの画像を作る。</li>
+          <li>画像を imgbb に預けて、インターネット上のURLをもらう。</li>
+          <li>そのURLと「今日は傘が要るか」の一言を、LINEへまとめて送る。</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 仕組みのポイント ============ -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">05 — 中身</p>
+      <h2>知っておくと分かりやすい4つのこと</h2>
+    </div>
+
+    <div class="scale-wrap">
+      <p class="note" style="max-width:68ch">
+        気象庁のナウキャストは、雨の強さを<strong>色</strong>で表した地図として配信されています。
+        <code>jma_nowcast.py</code> は自宅の位置にあたるピクセルの色を読み、この対応表で数値に戻しています。
+        この資料の配色も、この気象庁のスケールから取っています。
+      </p>
+      <div class="scale" role="img" aria-label="気象庁の降水強度カラースケール。薄い青から濃い青、黄色、オレンジ、赤、紫へと、雨が強くなるほど暖色に変化する。">
+        <div style="background:#F2F2FF"></div>
+        <div style="background:#A0D2FF"></div>
+        <div style="background:#218CFF"></div>
+        <div style="background:#0041FF"></div>
+        <div style="background:#FAF500"></div>
+        <div style="background:#FF9900"></div>
+        <div style="background:#FF2800"></div>
+        <div style="background:#B40068"></div>
+      </div>
+      <div class="scale-labels">
+        <div>0.1</div><div>1</div><div>5</div><div>10</div>
+        <div>20</div><div>30</div><div>50</div><div>80+</div>
+      </div>
+      <div class="marks">
+        <i><span class="dot" style="background:#A0D2FF"></span>1mm/h 以上 → 「まもなく雨」を通知</i>
+        <i><span class="dot" style="background:#FAF500"></span>20mm/h 以上 → 「豪雨注意」を通知</i>
+      </div>
+    </div>
+
+    <div class="points">
+      <div class="point">
+        <p class="q">なぜ2つ？</p>
+        <h3>データ源を2つ使う理由</h3>
+        <p>
+          気象庁のナウキャストは細かくて速い代わりに、<b>公式のAPIとして公開されているものではありません</b>。
+          気象庁のサイトが内部で使っている配信を借りているので、将来仕様が変わって使えなくなる可能性があります。
+          そこで Open-Meteo を保険として並べ、片方が止まってももう片方で動き続けるようにしています。
+        </p>
+      </div>
+
+      <div class="point">
+        <p class="q">なぜ間隔をあける？</p>
+        <h3>同じ雨で連投しない工夫</h3>
+        <p>
+          5分ごとに動くので、雨が1時間降り続ければ12回判定されます。そのたびに通知したら邪魔なだけなので、
+          一度送ったら一定時間は黙る仕組み（クールダウン）を入れました。
+          ただし<b>弱い雨と豪雨は別々に管理</b>していて、小雨の通知直後でも豪雨は必ず届きます。
+        </p>
+      </div>
+
+      <div class="point">
+        <p class="q">実際にあった不具合</p>
+        <h3>時差という落とし穴</h3>
+        <p>
+          GitHubのサーバーは世界標準時、天気データは日本時間で返ってきます。これをそのまま比べていたため
+          <b>9時間ずれて雨を全部見逃す</b>状態になっていました。自分のMacは日本時間なので気づけなかったものです。
+          世界標準時の環境を再現して不具合を確認し、時刻の扱いを日本時間に統一して直しています。
+        </p>
+      </div>
+
+      <div class="point">
+        <p class="q">なぜ画像を外に置く？</p>
+        <h3>グラフがimgbbを通る理由</h3>
+        <p>
+          LINEに画像を送るときは、画像そのものではなく<b>画像のある場所（URL）</b>を伝える決まりになっています。
+          LINE側がそのURLに画像を取りに行くしくみです。作ったグラフはクラウド上に一時的にあるだけでURLを持たないため、
+          imgbbという無料の置き場所に預けてURLをもらっています。
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 使っているサービス ============ -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">06 — 外部サービス</p>
+      <h2>使っているサービスと費用</h2>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>サービス</th><th>役割</th><th>費用</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="svc">気象庁ナウキャスト</td><td>250mメッシュ・5分更新の降水データ（画像形式）</td><td>無料・登録不要</td></tr>
+          <tr><td class="svc">Open-Meteo</td><td>予報モデルによる降水データ（数値形式）</td><td>無料・登録不要</td></tr>
+          <tr><td class="svc">LINE Messaging API</td><td>スマホへの通知</td><td>無料枠 <b>月200通</b><br>（超えるとその月は送れない）</td></tr>
+          <tr><td class="svc">imgbb</td><td>グラフ画像の置き場所</td><td>無料</td></tr>
+          <tr><td class="svc">GitHub Actions</td><td>決まった時刻にプログラムを動かすサーバー</td><td><b>公開リポジトリなので無制限に無料</b><br>（非公開なら月2,000分まで）</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      LINE Notify は2025年3月末で終了しているため、後継の LINE Messaging API を使っています。
+      GitHub Actionsは<strong>1回の実行を1分単位に切り上げて</strong>計上します。実際の処理が27秒でも1分と数えられるため、
+      5分間隔だと月8,640分に達し、非公開リポジトリの無料枠（2,000分）では約7日で尽きます。
+      公開リポジトリに切り替えたのは、この制限を外して5分間隔を維持するためです。
+    </p>
+  </section>
+
+  <!-- ============ 注意点 ============ -->
+  <section>
+    <div class="sec-head">
+      <p class="eyebrow">07 — 注意</p>
+      <h2>運用するうえで気をつけること</h2>
+    </div>
+    <div class="cautions">
+      <div class="caution">
+        <span class="lbl">01</span>
+        <div>
+          <b>座標をコードに書き戻さないこと</b>
+          このリポジトリは<b>公開</b>されています（GitHub Actionsを無制限に無料で使うため）。
+          自宅の緯度経度は <code>.env</code> とGitHubのSecretsにだけ置き、コードには絶対に書かないでください。
+          一度コミットすると、後で消しても<b>gitの履歴に残り続けます</b>。
+        </div>
+      </div>
+      <div class="caution">
+        <span class="lbl">02</span>
+        <div>
+          <b>LINEの無料枠は月200通まで</b>
+          毎朝のグラフが1日2通（画像＋文章）で月60通を使うため、豪雨アラートに使えるのは<b>月140通ほど</b>です。
+          雨の多い月に上限に達すると、その月はそれ以上送れなくなります（自動で課金されることはありません）。
+        </div>
+      </div>
+      <div class="caution">
+        <span class="lbl">03</span>
+        <div>
+          <b>実行間隔は5分（3分ではない）</b>
+          GitHub Actionsの定期実行は最短5分間隔が目安で、それより短く指定しても間引かれます。
+          気象庁のデータ自体が5分ごとの更新なので、情報の新しさは落ちていません。
+        </div>
+      </div>
+      <div class="caution">
+        <span class="lbl">04</span>
+        <div>
+          <b>通知が数分遅れることがある</b>
+          GitHub側の混み具合によって、決まった時刻から数分ずれて動くことがあります。仕様上避けられません。
+        </div>
+      </div>
+      <div class="caution">
+        <span class="lbl">05</span>
+        <div>
+          <b>気象庁側の仕様変更で止まる可能性がある</b>
+          非公式の配信を使っているため、ある日突然データが取れなくなることがあり得ます。
+          その場合もOpen-Meteo側だけで動き続けますが、細かさと速さは落ちます。
+        </div>
+      </div>
+    </div>
+  </section>
+
+</div>

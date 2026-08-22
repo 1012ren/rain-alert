@@ -1,0 +1,42 @@
+name: Rain Alert
+
+on:
+  schedule:
+    # GitHub Actionsのcronは協定世界時(UTC)。日本時間との時差は無視できる頻度なのでそのままJSTの3分刻みに近い間隔で実行する。
+    # GitHub側の仕様上、最短でも5分間隔が目安(*/3のように書いても、実際は間引かれたり数分遅れたりする)。
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}  # 手動実行ボタン用(動作確認に使う)
+
+# 通知のクールダウン状態(rain_alert_state.json)をリポジトリにコミットし直すために書き込み権限が必要
+permissions:
+  contents: write
+
+jobs:
+  check-rain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 依存ライブラリのインストール
+        run: pip install -r requirements.txt
+
+      - name: 降水チェック実行
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          HOME_LAT: ${{ secrets.HOME_LAT }}
+          HOME_LON: ${{ secrets.HOME_LON }}
+        run: python3 rain_alert.py
+
+      - name: クールダウン状態をコミット
+        run: |
+          git config user.name "rain-alert-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add rain_alert_state.json
+          # 変更が無ければ何もしない(diffが無いとcommitはエラーになるため)
+          git diff --cached --quiet || git commit -m "update rain alert state"
+          git push
