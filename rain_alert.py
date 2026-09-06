@@ -116,14 +116,20 @@ def fetch_precipitation_forecast(lat: float, lon: float) -> list[dict]:
     return forecast
 
 
-def get_upcoming_max_rain(forecast: list[dict], minutes: int) -> tuple[float, str]:
+def get_upcoming_max_rain(forecast: list[dict], minutes: int):
     """
-    直近 minutes 分以内で最大の降水強度と、その時刻を返す。
+    直近 minutes 分以内で最大の降水強度と、その「時刻そのもの」を返す。
+
+    戻り値: (降水強度mm/h, datetime または None)
+
+    時刻を文字列ではなく datetime で返すのが大事なところ。
+    呼び出し側が「その時刻は過去か未来か」を判定できるようにするため。
+    (以前は文字列で返していたので、進行中の枠のラベル=過去の時刻を
+     そのまま「◯◯時ごろから降ります」と案内してしまっていた)
     """
     # 【重要】Open-MeteoにはAsia/Tokyoを指定しているので、返ってくる時刻はJST。
     # 一方 datetime.now() は「実行しているマシンの時刻」を返す。
-    # GitHub Actionsのサーバーは常にUTCなので、そのまま比べると9時間ずれて
-    # 予報を1件も拾えなくなる。必ずJSTで「今」を取ること。
+    # サーバーがUTCだとそのまま比べて9時間ずれるため、必ずJSTで「今」を取る。
     now = datetime.now(JST)
 
     # 予報は15分刻みなので、「今まさに進行中の枠」も対象に含めたい。
@@ -133,7 +139,7 @@ def get_upcoming_max_rain(forecast: list[dict], minutes: int) -> tuple[float, st
     window_end = now + timedelta(minutes=minutes)
 
     max_rain = 0.0
-    max_time = ""
+    max_dt = None
 
     for entry in forecast:
         # APIの時刻文字列にはタイムゾーンが書かれていない("2026-08-23T02:00")ので、
@@ -142,19 +148,19 @@ def get_upcoming_max_rain(forecast: list[dict], minutes: int) -> tuple[float, st
         if window_start <= entry_time <= window_end:
             if entry["precip_mm_h"] > max_rain:
                 max_rain = entry["precip_mm_h"]
-                max_time = entry_time.strftime("%H:%M")
+                max_dt = entry_time
 
-    return max_rain, max_time
+    return max_rain, max_dt
 
 
 # ============ 2つのデータ源をまとめる ============
 
 
-def get_rain_outlook(state: dict) -> tuple[float, str, str, str]:
+def get_rain_outlook(state: dict):
     """
     気象庁ナウキャストとOpen-Meteoの両方を調べ、強い方を採用する。
 
-    戻り値: (降水強度mm/h, 時刻, データ源名, 気象庁のbasetime)
+    戻り値: (降水強度mm/h, 時刻のdatetime または None, データ源名, 気象庁のbasetime)
 
     片方が失敗しても、もう片方の結果で動き続ける(try/except)。
     非公式のタイル配信を使っている都合上、これは実用上かなり重要。
@@ -184,11 +190,12 @@ def get_rain_outlook(state: dict) -> tuple[float, str, str, str]:
 
     # 内訳をログに残しておくと、後で「どちらが当たっていたか」を検証できる
     for rain, when, source in candidates:
-        print(f"  {source}: {rain:.1f}mm/h ({when or '降水なし'})")
+        label = when.strftime("%H:%M") if when else "降水なし"
+        print(f"  {source}: {rain:.1f}mm/h ({label})")
 
     # 見逃しを減らすため、強い方を採用する
-    max_rain, max_time, source = max(candidates, key=lambda c: c[0])
-    return max_rain, max_time, source, basetime
+    max_rain, max_dt, source = max(candidates, key=lambda c: c[0])
+    return max_rain, max_dt, source, basetime
 
 
 # ============ 通知のクールダウン管理 ============
@@ -257,34 +264,73 @@ def send_line_message(message: str):
 # ============ メイン処理 ============
 
 
+def describe_timing(max_dt) -> tuple[str, str]:
+    """
+    雨のピーク時刻から、通知文に使う「見出し」と「時の表現」を作る。
+
+    戻り値: (見出しに付ける語, 時の表現)
+
+    ここが今回の修正の要。データの時刻は次の理由でしばしば過去になる:
+      - 気象庁の実況は数分前の観測値
+      - Open-Meteoの15分枠は「進行中の枠」を含めている
+    それを「◯◯時ごろから降ります」と書くと、過ぎた時刻を案内してしまう。
+    過去なら「今すでに降っている」と伝えるのが正しい。
+    """
+    now = datetime.now(JST)
+
+    if max_dt is None:
+        return "", "まもなく"
+
+    minutes_ahead = (max_dt - now).total_seconds() / 60
+
+    if minutes_ahead <= 0:
+        # 既に始まっている(実況、または進行中の15分枠)
+        return "降っています", "すでに"
+    if minutes_ahead < 10:
+        # 10分未満は「◯時◯分ごろ」と書くより「まもなく」の方が伝わる
+        return "まもなく", "まもなく"
+    return "まもなく", f"{max_dt:%H:%M}ごろから"
+
+
 def main():
     print(f"[{datetime.now(JST):%Y-%m-%d %H:%M:%S} JST] 降水予報をチェック中...")
 
     state = load_state()
-    max_rain, max_time, source, basetime = get_rain_outlook(state)
+    max_rain, max_dt, source, basetime = get_rain_outlook(state)
 
-    print(f"採用: {max_rain:.1f}mm/h ({max_time or 'N/A'}) ← {source}")
+    label = max_dt.strftime("%H:%M") if max_dt else "N/A"
+    print(f"採用: {max_rain:.1f}mm/h ({label}) ← {source}")
+
+    ongoing, when_phrase = describe_timing(max_dt)
 
     # 強い方から順に判定する。豪雨なら豪雨の通知だけを出す。
     if max_rain >= HEAVY_RAIN_THRESHOLD_MM_H:
         level = "heavy"
         cooldown = HEAVY_COOLDOWN_MINUTES
+        head = "【豪雨】今、激しい雨が降っています" if ongoing == "降っています" \
+            else "【豪雨注意】まもなく激しい雨です"
+        body = (f"自宅付近で約{max_rain:.0f}mm/h以上の雨。"
+                if ongoing == "降っています"
+                else f"自宅付近で{when_phrase}、約{max_rain:.0f}mm/h以上の激しい雨の予想です。")
         message = (
-            f"【豪雨注意】\n"
-            f"自宅付近で {max_time} ごろ、\n"
-            f"約{max_rain:.0f}mm/h以上の激しい雨が予想されています。\n"
+            f"{head}\n"
+            f"{body}\n"
             f"洗濯物・窓の確認をおすすめします。\n"
-            f"(出典: {source})"
+            f"(出典: {source} / {datetime.now(JST):%H:%M}時点)"
         )
     elif max_rain >= RAIN_THRESHOLD_MM_H:
         level = "rain"
         cooldown = RAIN_COOLDOWN_MINUTES
+        head = "【雨】今、雨が降っています" if ongoing == "降っています" \
+            else "【まもなく雨】"
+        body = (f"自宅付近で約{max_rain:.1f}mm/hの雨。"
+                if ongoing == "降っています"
+                else f"自宅付近で{when_phrase}、約{max_rain:.1f}mm/hの雨の予想です。")
         message = (
-            f"【まもなく雨】\n"
-            f"自宅付近で {max_time} ごろから、\n"
-            f"約{max_rain:.1f}mm/hの雨が予想されています。\n"
+            f"{head}\n"
+            f"{body}\n"
             f"洗濯物の取り込みをおすすめします。\n"
-            f"(出典: {source})"
+            f"(出典: {source} / {datetime.now(JST):%H:%M}時点)"
         )
     else:
         print("しきい値未満のため通知なし。")

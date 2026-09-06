@@ -151,8 +151,11 @@ def get_max_rain_within(lat: float, lon: float, minutes: int):
     """
     現在の実況＋指定分数先までの予測を調べ、最大の降水強度を返す。
 
-    戻り値: (最大降水強度mm/h, その時刻の文字列, 実況のbasetime)
-    basetimeは「データが更新されたか」の判定に使う。
+    戻り値: (最大降水強度mm/h, その時刻のdatetime または None, 実況のbasetime)
+
+    時刻を文字列ではなく datetime で返すのが大事なところ。
+    実況(N1)は必ず数分前のデータなので、そのまま「◯◯時ごろから降ります」と
+    案内すると過去の時刻を伝えてしまう。呼び出し側で過去/未来を判定できるようにする。
     """
     now = datetime.now(JST)
     cutoff = now + timedelta(minutes=minutes)
@@ -168,15 +171,15 @@ def get_max_rain_within(lat: float, lon: float, minutes: int):
             checks.append((entry["basetime"], entry["validtime"]))
 
     max_rain = 0.0
-    max_time = ""
+    max_dt = None
 
     for basetime, validtime in checks:
         rain = fetch_rain_at(basetime, validtime, lat, lon)
         if rain > max_rain:
             max_rain = rain
-            max_time = parse_jma_time(validtime).strftime("%H:%M")
+            max_dt = parse_jma_time(validtime)
 
-    return max_rain, max_time, latest["basetime"]
+    return max_rain, max_dt, latest["basetime"]
 
 
 if __name__ == "__main__":
@@ -191,4 +194,5 @@ if __name__ == "__main__":
 
     rain, when, basetime = get_max_rain_within(LAT, LON, 30)
     print(f"基準時刻: {parse_jma_time(basetime).strftime('%Y-%m-%d %H:%M')} (JST)")
-    print(f"直近30分の最大降水強度: {rain:.1f}mm/h ({when or '降水なし'})")
+    label = when.strftime("%H:%M") if when else "降水なし"
+    print(f"直近30分の最大降水強度: {rain:.1f}mm/h ({label})")
