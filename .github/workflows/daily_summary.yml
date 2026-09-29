@@ -1,10 +1,21 @@
 name: Daily Rain Summary
 
 on:
-  schedule:
-    # 6:00 JST = 21:00 UTC(前日)。JSTはUTC+9のため。
-    - cron: "0 21 * * *"
+  # 主役: cron-job.org から毎朝6:00(JST)に合図が届く
   workflow_dispatch: {}
+  # 保険: 合図が届かなかった日のため、GitHub自身の定期実行も残す。
+  # (GitHubは数時間遅れがちだが、1日1回の制限があるので二重には届かない)
+  schedule:
+    - cron: "0 21 * * *"   # 6:00 JST = 21:00 UTC(前日)
+
+# 「送信済み」の記録をリポジトリに保存し直すため、書き込み権限が必要
+permissions:
+  contents: write
+
+# 同時に2つ動かさない。同時に動くと両方が「まだ送っていない」と判断して二重に届くため。
+concurrency:
+  group: daily-summary
+  cancel-in-progress: false
 
 jobs:
   send-summary:
@@ -31,3 +42,14 @@ jobs:
           HOME_LON: ${{ secrets.HOME_LON }}
           IMGBB_API_KEY: ${{ secrets.IMGBB_API_KEY }}
         run: python3 daily_summary.py
+
+      - name: 送信済みの記録を保存
+        run: |
+          git config user.name "rain-alert-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add daily_summary_state.json 2>/dev/null || true
+          git diff --cached --quiet && exit 0
+          git commit -m "update daily summary state"
+          # 雨アラート側も同じブランチに保存するので、先に最新を取り込んでから送る
+          git pull --rebase
+          git push

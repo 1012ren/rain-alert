@@ -21,6 +21,7 @@ daily_summary.py
 """
 
 import base64
+import json
 import os
 from datetime import datetime, timedelta
 
@@ -158,7 +159,7 @@ def send_line_image_and_text(image_url: str, caption: str):
     """LINE Messaging APIで画像1枚とテキスト1通をまとめて送る。"""
     if not rain_alert.LINE_CHANNEL_ACCESS_TOKEN or not rain_alert.LINE_USER_ID:
         print("LINEの設定(トークン/ユーザーID)が未設定です。")
-        return
+        return False
 
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
@@ -180,8 +181,9 @@ def send_line_image_and_text(image_url: str, caption: str):
     response = requests.post(url, headers=headers, json=body, timeout=10)
     if response.status_code == 200:
         print("LINEへグラフを送信しました。")
-    else:
-        print(f"LINE送信に失敗しました: {response.status_code} {response.text}")
+        return True
+    print(f"LINE送信に失敗しました: {response.status_code} {response.text}")
+    return False
 
 
 # ============ メイン処理 ============
@@ -207,8 +209,34 @@ def build_caption(forecast: list[dict]) -> str:
     )
 
 
+# ============ 1日1回の制限 ============
+#
+# このスクリプトは外部サービス(cron-job.org)からの合図で動く。
+# 万一その合図を悪用されて何十回も動かされても、LINEの無料枠(月200通)を
+# 使い切られないよう、「その日(日本時間)にすでに送っていたら何もしない」。
+
+STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "daily_summary_state.json")
+
+
+def already_sent_today() -> bool:
+    if not os.path.exists(STATE_FILE):
+        return False
+    with open(STATE_FILE) as f:
+        last = json.load(f).get("last_sent_date")
+    return last == datetime.now(rain_alert.JST).strftime("%Y-%m-%d")
+
+
+def record_sent_today():
+    with open(STATE_FILE, "w") as f:
+        json.dump({"last_sent_date": datetime.now(rain_alert.JST).strftime("%Y-%m-%d")}, f)
+
+
 def main():
     print(f"[{datetime.now(rain_alert.JST):%Y-%m-%d %H:%M:%S} JST] 1日分の降水予報を作成中...")
+
+    if already_sent_today():
+        print("今日はすでに送信済みのため、何もしません(1日1回の制限)。")
+        return
 
     forecast = fetch_hourly_forecast(rain_alert.HOME_LAT, rain_alert.HOME_LON)
     chart_path = build_chart(forecast)
@@ -218,7 +246,9 @@ def main():
     print(f"アップロード完了: {image_url}")
 
     caption = build_caption(forecast)
-    send_line_image_and_text(image_url, caption)
+    # 送信に成功したときだけ記録する(失敗した日は次の合図で再挑戦できる)
+    if send_line_image_and_text(image_url, caption):
+        record_sent_today()
 
 
 if __name__ == "__main__":

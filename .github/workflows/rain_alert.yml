@@ -1,15 +1,21 @@
 name: Rain Alert
 
 on:
+  # 主役: cron-job.org から5分ごとに合図が届く
+  workflow_dispatch: {}
+  # 保険: GitHub自身の定期実行も残す(実測では平均2〜3時間に1回しか動かないが、
+  # 合図が止まったときに完全に止まるよりは良い)
   schedule:
-    # GitHub Actionsのcronは協定世界時(UTC)。日本時間との時差は無視できる頻度なのでそのままJSTの3分刻みに近い間隔で実行する。
-    # GitHub側の仕様上、最短でも5分間隔が目安(*/3のように書いても、実際は間引かれたり数分遅れたりする)。
     - cron: "*/5 * * * *"
-  workflow_dispatch: {}  # 手動実行ボタン用(動作確認に使う)
 
 # 通知のクールダウン状態(rain_alert_state.json)をリポジトリにコミットし直すために書き込み権限が必要
 permissions:
   contents: write
+
+# 同時に2つ動かさない(通知履歴の読み書きが食い違って二重通知になるのを防ぐ)
+concurrency:
+  group: rain-alert
+  cancel-in-progress: false
 
 jobs:
   check-rain:
@@ -38,5 +44,8 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
           git add rain_alert_state.json
           # 変更が無ければ何もしない(diffが無いとcommitはエラーになるため)
-          git diff --cached --quiet || git commit -m "update rain alert state"
+          git diff --cached --quiet && exit 0
+          git commit -m "update rain alert state"
+          # 朝のグラフ側も同じブランチに保存するので、先に最新を取り込んでから送る
+          git pull --rebase
           git push
